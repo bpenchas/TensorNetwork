@@ -1,11 +1,14 @@
 import pytest
 import numpy as np
+import math
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Sequential
 from tensornetwork.tn_keras.dense import DenseDecomp
+from tensornetwork.tn_keras.mpo import DenseMPO
+from tensorflow.keras.layers import Dense # type: ignore
 
 
-@pytest.fixture(params=[50, 100, 256])
+@pytest.fixture(params=[256, 1024])
 def dummy_data(request):
   np.random.seed(42)
   # Generate dummy data for use in tests
@@ -14,20 +17,40 @@ def dummy_data(request):
   return data, labels
 
 
-def test_train(dummy_data):
+@pytest.fixture(params=['DenseDecomp', 'DenseMPO'])
+def make_model(dummy_data, request):
+  # Disable the redefined-outer-name violation in this function
+  # pylint: disable=redefined-outer-name
+  data, _ = dummy_data
+  print(request.param)
+  if request.param == 'DenseMPO':
+    model = Sequential()
+    model.add(
+        DenseMPO(data.shape[1],
+                 num_nodes=int(math.log(int(data.shape[1]), 4)),
+                 bond_dim=8,
+                 use_bias=True,
+                 activation='relu',
+                 input_dim=data.shape[1]))
+    model.add(Dense(1, activation='sigmoid'))
+  else:
+    model = Sequential()
+    model.add(
+        DenseDecomp(512,
+                    decomp_size=128,
+                    use_bias=True,
+                    activation='relu',
+                    input_dim=data.shape[1]))
+    model.add(Dense(1, activation='sigmoid'))
+
+  return model
+
+
+def test_train(dummy_data, make_model):
   # Disable the redefined-outer-name violation in this function
   # pylint: disable=redefined-outer-name
   data, labels = dummy_data
-
-  model = Sequential()
-  model.add(
-      DenseDecomp(512,
-                  decomp_size=128,
-                  use_bias=True,
-                  activation='relu',
-                  input_dim=data.shape[1]))
-  model.add(DenseDecomp(256, decomp_size=64, activation='relu'))
-  model.add(DenseDecomp(1, decomp_size=64, activation='sigmoid'))
+  model = make_model
   model.compile(optimizer='adam',
                 loss='binary_crossentropy',
                 metrics=['accuracy'])
@@ -39,19 +62,12 @@ def test_train(dummy_data):
   assert history.history['loss'][0] > history.history['loss'][-1]
   assert history.history['accuracy'][0] < history.history['accuracy'][-1]
 
-def test_weights_change(dummy_data):
+
+def test_weights_change(dummy_data, make_model):
   # Disable the redefined-outer-name violation in this function
   # pylint: disable=redefined-outer-name
   data, labels = dummy_data
-
-  model = Sequential()
-  model.add(
-      DenseDecomp(512,
-                  decomp_size=128,
-                  use_bias=True,
-                  activation='relu',
-                  input_dim=data.shape[1]))
-  model.add(DenseDecomp(1, decomp_size=64, use_bias=True, activation='sigmoid'))
+  model = make_model
   model.compile(optimizer='adam',
                 loss='binary_crossentropy',
                 metrics=['accuracy'])
@@ -65,26 +81,23 @@ def test_weights_change(dummy_data):
   for i, _ in enumerate(before):
     assert (after[i] != before[i]).any()
 
-def test_output_shape(dummy_data):
+
+def test_output_shape(dummy_data, make_model):
   # Disable the redefined-outer-name violation in this function
   # pylint: disable=redefined-outer-name
   data, _ = dummy_data
   data = K.constant(data)
   input_shape = data.shape
 
-  dd = DenseDecomp(256,
-                   decomp_size=128,
-                   use_bias=False,
-                   activation='relu',
-                   input_dim=input_shape[1])
+  model = make_model
 
-  actual_output_shape = dd(data).shape
-  expected_output_shape = dd.compute_output_shape(input_shape)
+  actual_output_shape = model(data).shape
+  expected_output_shape = model.compute_output_shape(input_shape)
 
   np.testing.assert_equal(expected_output_shape, actual_output_shape)
 
 
-def test_num_parameters(dummy_data):
+def test_decomp_num_parameters(dummy_data):
   # Disable the redefined-outer-name violation in this function
   # pylint: disable=redefined-outer-name
   data, _ = dummy_data
@@ -102,5 +115,34 @@ def test_num_parameters(dummy_data):
   # num_params = a_params + b_params + bias_params
   expected_num_parameters = (data.shape[1] * decomp_size) + (
       decomp_size * output_dim) + output_dim
+
+  np.testing.assert_equal(expected_num_parameters, model.count_params())
+
+
+def test_mpo_num_parameters(dummy_data):
+  # Disable the redefined-outer-name violation in this function
+  # pylint: disable=redefined-outer-name
+  data, _ = dummy_data
+  input_dim = data.shape[1]
+  output_dim = data.shape[1]
+  num_nodes = int(math.log(data.shape[1], 4))
+  bond_dim = 8
+
+  model = Sequential()
+  model.add(
+      DenseMPO(output_dim,
+               num_nodes=num_nodes,
+               bond_dim=bond_dim,
+               use_bias=True,
+               activation='relu',
+               input_dim=input_dim))
+
+  in_leg_dim = int(input_dim**(1. / num_nodes))
+  out_leg_dim = int(output_dim**(1. / num_nodes))
+
+  # num_params = num_edge_node_params + num_middle_node_params + bias_params
+  expected_num_parameters = (2 * in_leg_dim * bond_dim * out_leg_dim) + (
+      (num_nodes - 2) * in_leg_dim * bond_dim * bond_dim *
+      out_leg_dim) + output_dim
 
   np.testing.assert_equal(expected_num_parameters, model.count_params())
